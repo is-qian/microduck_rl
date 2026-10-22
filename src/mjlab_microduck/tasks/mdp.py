@@ -7704,3 +7704,245 @@ def roulade_lateral_velocity_penalty(
     """Body-frame lateral (y) linear velocity² — keeps the roll straight."""
     asset: Entity = env.scene[asset_cfg.name]
     return torch.nan_to_num(asset.data.root_link_lin_vel_b[:, 1].pow(2), nan=0.0)
+
+
+# ── Headstand ─────────────────────────────────────────────────────────────────
+
+
+def body_inverted_linear(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """+1 fully inverted, 0 horizontal, -1 upright. Mirror of
+    ``body_upright_linear`` — non-zero gradient at every tilt so the policy
+    gets pulled toward inversion even from upright."""
+    asset: Entity = env.scene[asset_cfg.name]
+    quat = asset.data.root_link_quat_w
+    qx = quat[:, 1]
+    qy = quat[:, 2]
+    return 2.0 * (qx * qx + qy * qy) - 1.0
+
+
+def body_inverted_gaussian(
+    env: ManagerBasedRlEnv,
+    std: float = 0.15,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Sharp Gaussian on deviation from full inversion. Deviation-squared
+    proxy is ``2*(qw² + qz²) = 1 - cos(dev)``, the mirror of
+    ``body_upright_gaussian``'s tilt proxy."""
+    asset: Entity = env.scene[asset_cfg.name]
+    quat = asset.data.root_link_quat_w
+    qw = quat[:, 0]
+    qz = quat[:, 3]
+    dev_sq = 2.0 * (qw * qw + qz * qz)
+    return torch.exp(-dev_sq / (std * std))
+
+
+def headstand_hold(
+    env: ManagerBasedRlEnv,
+    head_sensor_name: str,
+    feet_sensor_name: str,
+    std: float,
+    min_force: float,
+    require_head_top: bool = False,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Hard gate defining the maneuver: pays only while head-supported AND
+    feet airborne, scaled by the inversion Gaussian. The gate must be hard
+    (contact state), not a small penalty — ungated inversion rewards get
+    farmed by mid-air flailing.
+
+    require_head_top: additionally require the FLAT TOP of the head on the
+    floor (roulade's axis check) — without it the policy balances on its
+    chin/jaw, which also passes head-contact + feet-air + inversion (v5)."""
+    head = env.scene.sensors[head_sensor_name].data.force  # (N, slots, 3)
+    head_force = torch.nan_to_num(torch.linalg.norm(head, dim=-1), nan=0.0)
+    if head_force.dim() > 1:
+        head_force = head_force.sum(dim=-1)
+    feet_found = env.scene.sensors[feet_sensor_name].data.found
+    feet_found = torch.nan_to_num(feet_found, nan=0.0)
+    if feet_found.dim() > 1:
+        feet_found = feet_found.sum(dim=-1)
+    gate = ((head_force > min_force) & (feet_found <= 0.0)).float()
+    if require_head_top:
+        asset: Entity = env.scene[asset_cfg.name]
+        gate = gate * _head_top_down(env, asset).float()
+    return gate * body_inverted_gaussian(env, std=std, asset_cfg=asset_cfg)
+
+
+def feet_contact_inverted_penalty(
+    env: ManagerBasedRlEnv,
+    feet_sensor_name: str,
+    tilt_from_inverted_deg: float = 45.0,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Self-negating (≤0): -1 while a foot touches the ground near full
+    inversion — kills the "inverted but feet still down" cheat. Use a
+    POSITIVE weight."""
+    feet_found = env.scene.sensors[feet_sensor_name].data.found
+    feet_found = torch.nan_to_num(feet_found, nan=0.0)
+    if feet_found.dim() > 1:
+        feet_found = feet_found.sum(dim=-1)
+    inverted = body_inverted_linear(env, asset_cfg) > math.cos(math.radians(tilt_from_inverted_deg))
+    return -((inverted) & (feet_found > 0.0)).float()
+# Per-env headstand state (created lazily, reset by reset_headstand_state):
+#   env._hs_frontier — max-so-far inversion cosine (progress frontier)
+#   env._hs_paid     — frontier already paid out by headstand_progress
+
+
+def _headstand_state(env: ManagerBasedRlEnv) -> tuple:
+    if not hasattr(env, "_hs_accum"):
+        # Standing spawn reads cos_dev = -1, so accum/frontier/paid start at
+        # -1 and no progress is ever paid for the spawn pose itself.
+        z = torch.full((env.num_envs,), -1.0, device=env.device)
+        env._hs_accum = z.clone()
+        env._hs_frontier = z.clone()
+        env._hs_paid = z.clone()
+        env._hs_prev_cos = z.clone()
+        env._hs_prev_supported = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+    return env._hs_accum, env._hs_frontier, env._hs_paid
+
+
+def reset_headstand_state(env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> None:
+    accum, frontier, paid = _headstand_state(env)
+    accum[env_ids] = -1.0
+    frontier[env_ids] = -1.0
+    paid[env_ids] = -1.0
+    env._hs_prev_cos[env_ids] = -1.0
+    env._hs_prev_supported[env_ids] = True
+
+
+def headstand_progress(
+    env: ManagerBasedRlEnv,
+    feet_sensor_name: str,
+    head_sensor_name: str,
+    max_paid_per_step: float = 0.05,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Potential-based bootstrap with a SUPPORT-GATED integrator: the
+    inversion-cosine accumulator only integrates Δcos_dev on steps where the
+    robot was ground-supported on BOTH the previous and current step, and
+    each step pays at most ``max_paid_per_step`` (excess forfeited). A
+    ballistic hop rotates for free in the air and its touchdown jump is
+    forfeited — bounce-and-catch earns nothing (v3 hole, the same exploit as
+    roulade run-1's ballistic whip). Camping and bobbing pay zero; a full
+    supported stand→invert entry pays 2×weight in total."""
+    accum, frontier, paid = _headstand_state(env)
+    cos_dev = torch.nan_to_num(body_inverted_linear(env, asset_cfg), nan=-1.0)
+    feet = _sensor_any_contact(env, feet_sensor_name)
+    head = _sensor_any_contact(env, head_sensor_name)
+    supported = torch.ones_like(cos_dev, dtype=torch.bool)
+    if feet is not None:
+        supported = feet
+    if head is not None:
+        supported = supported | head
+    ok = supported & env._hs_prev_supported
+    delta = torch.where(ok, cos_dev - env._hs_prev_cos, torch.zeros_like(cos_dev))
+    env._hs_accum = accum + torch.nan_to_num(delta, nan=0.0)
+    env._hs_frontier = torch.maximum(frontier, env._hs_accum)
+    pay = torch.clamp(env._hs_frontier - paid, min=0.0, max=max_paid_per_step)
+    env._hs_paid = paid + pay
+    env._hs_prev_cos = cos_dev
+    env._hs_prev_supported = supported
+    return pay
+
+
+def headstand_leg_pose_gated(
+    env: ManagerBasedRlEnv,
+    std: float,
+    joint_indices: list,
+    feet_sensor_name: str,
+    head_sensor_name: str,
+    min_force: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """HOME leg pose as a multiplicative composite: pose × sharp inversion
+    gaussian × hold gate (head-supported AND feet airborne). The leg pose
+    only matters for keeping the CoM over the head DURING the hold — paying
+    it anywhere else is farmable (v1: lying; v2: flopped, feet tucked; v4:
+    face-up flop with legs overhead)."""
+    pose = pose_target_match(env, std=std, joint_indices=joint_indices, target_overrides=None)
+    # Sharp gaussian, not a smoothstep: a face-up flop (head contact, feet
+    # air, ~45° off inverted) passes the smoothstep but reads ≈0 here.
+    cos_gate = body_inverted_gaussian(env, std=0.3, asset_cfg=asset_cfg)
+    hold = headstand_hold(
+        env,
+        head_sensor_name=head_sensor_name,
+        feet_sensor_name=feet_sensor_name,
+        std=math.pi,  # ≈1 everywhere; the hold gate is what matters here
+        min_force=min_force,
+        require_head_top=True,
+        asset_cfg=asset_cfg,
+    )
+    return pose * cos_gate * hold
+
+
+def set_headstand_spawn_state(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    near_inverted_prob: float = 0.4,
+    tilt_min_deg: float = 140.0,
+    tilt_max_deg: float = 180.0,
+    root_z: float = 0.145,
+    root_z_noise: float = 0.01,
+    joint_noise_std: float = 0.1,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Reverse-curriculum spawns: a fraction of episodes start near-inverted
+    (head down, legs up; root z from the measured inverted geometry — lowest
+    head-assembly geom sits 0.134 below the root) so the HOLD is learned
+    before the hard entry exists. The progress accumulator is set to the
+    spawn orientation: spawning near the goal must not pay entry progress
+    for free."""
+    if env_ids is None or len(env_ids) == 0:
+        return
+    env_ids = env_ids.to(env.device, dtype=torch.int)
+    asset: Entity = env.scene[asset_cfg.name]
+    mask = torch.rand(len(env_ids), device=env.device) < near_inverted_prob
+    ids = env_ids[mask]
+    n = len(ids)
+    if n == 0:
+        return
+
+    tilt = torch.rand(n, device=env.device) * math.radians(tilt_max_deg - tilt_min_deg) + math.radians(tilt_min_deg)
+    yaw = torch.rand(n, device=env.device) * 2 * np.pi - np.pi
+    cy = torch.cos(yaw * 0.5); sy = torch.sin(yaw * 0.5)
+    cp = torch.cos(tilt * 0.5); sp = torch.sin(tilt * 0.5)
+    # yaw about world z, then pitch about y: q = q_yaw ⊗ q_pitch
+    quat = torch.stack([cy * cp, -sy * sp, cy * sp, sy * cp], dim=1)
+    z = root_z + (torch.rand(n, device=env.device) * 2 - 1) * root_z_noise
+
+    env.sim.data.qpos[ids, 2] = z + _env_origin_z(env, ids)
+    env.sim.data.qpos[ids, 3:7] = quat
+    env.sim.data.qvel[ids, :6] = 0.0
+
+    if joint_noise_std > 0.0:
+        servo_ids = _servo_joint_ids(env, asset)
+        cols = torch.tensor([7 + j for j in servo_ids], device=env.device, dtype=torch.long)
+        noise = torch.randn(n, len(cols), device=env.device) * joint_noise_std
+        env.sim.data.qpos[ids.unsqueeze(1).long(), cols.unsqueeze(0)] += noise
+
+    accum, frontier, paid = _headstand_state(env)
+    cos_spawn = 2.0 * (quat[:, 1] * quat[:, 1] + quat[:, 2] * quat[:, 2]) - 1.0
+    accum[ids] = cos_spawn
+    frontier[ids] = cos_spawn
+    paid[ids] = cos_spawn
+    env._hs_prev_cos[ids] = cos_spawn
+    env._hs_prev_supported[ids] = True
+
+
+def headstand_flight_penalty(
+    env: ManagerBasedRlEnv,
+    feet_sensor_name: str,
+    head_sensor_name: str,
+) -> torch.Tensor:
+    """Self-negating (≤0): -1 while fully unsupported (no foot AND no head
+    ground contact). The entry must be a smooth supported tip-over — never
+    airborne. Use a POSITIVE weight."""
+    supported = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    for name in (feet_sensor_name, head_sensor_name):
+        c = _sensor_any_contact(env, name)
+        if c is not None:
+            supported = supported | c
+    return -(~supported).float()

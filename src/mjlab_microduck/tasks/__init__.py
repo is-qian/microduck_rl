@@ -31,6 +31,10 @@ from .microduck_standup_env_cfg import (
     make_microduck_standup_env_cfg,
     MicroduckStandUpRlCfg,
 )
+from .microduck_headstand_env_cfg import (
+    make_microduck_headstand_env_cfg,
+    MicroduckHeadStandRlCfg,
+)
 from .microduck_velstand_env_cfg import (
     make_microduck_velstand_env_cfg,
     MicroduckVelStandRlCfg,
@@ -117,6 +121,14 @@ register_mjlab_task(
     env_cfg=make_microduck_standup_env_cfg(),
     play_env_cfg=make_microduck_standup_env_cfg(play=True),
     rl_cfg=MicroduckStandUpRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+register_mjlab_task(
+    task_id="Mjlab-HeadStand-Flat-MicroDuck",
+    env_cfg=make_microduck_headstand_env_cfg(),
+    play_env_cfg=make_microduck_headstand_env_cfg(play=True),
+    rl_cfg=MicroduckHeadStandRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
