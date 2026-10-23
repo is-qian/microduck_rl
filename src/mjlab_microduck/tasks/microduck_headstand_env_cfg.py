@@ -464,6 +464,14 @@ def make_microduck_headstand_env_cfg(
             "joint_noise_std": 0.1,
             # mid-roll states carry forward angular momentum (1–3 rad/s)
             "roll_vel_range": (0.5, 1.5),
+            # v12 forward-pitch assist for standing spawns, annealed to zero
+            # (~1500 iters at 8192 envs). Final behaviour must initiate the
+            # tip-over from a dead-stop stand — play/eval never assist.
+            **({} if play else {
+                "stand_pitch_max_deg": 45.0,
+                "stand_pitch_anneal_steps": 300_000_000,
+                "stand_pitch_vel": 1.0,
+            }),
         },
     )
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = (

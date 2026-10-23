@@ -7897,6 +7897,9 @@ def set_headstand_spawn_state(
     root_z_noise: float = 0.01,
     joint_noise_std: float = 0.1,
     roll_vel_range: tuple = (0.0, 0.0),
+    stand_pitch_max_deg: float = 0.0,
+    stand_pitch_anneal_steps: int = 0,
+    stand_pitch_vel: float = 1.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
     """Reverse-curriculum spawns: a fraction of episodes start near-inverted
@@ -7904,7 +7907,15 @@ def set_headstand_spawn_state(
     head-assembly geom sits 0.134 below the root) so the HOLD is learned
     before the hard entry exists. The progress accumulator is set to the
     spawn orientation: spawning near the goal must not pay entry progress
-    for free."""
+    for free.
+
+    Standing branch (the complement): forward-pitch ASSIST — spawn leaning
+    forward by U(0, stand_pitch_max_deg) with a matching pitch rate, annealed
+    linearly to zero over stand_pitch_anneal_steps env steps. A leaning start
+    makes the supported tip-over -> roll easy to discover; as the assist
+    fades the policy must initiate the lean itself, and at the limit the
+    spawn is a dead-stop stand. The hop is never needed because pivoting
+    over the feet is supported the whole way."""
     if env_ids is None or len(env_ids) == 0:
         return
     env_ids = env_ids.to(env.device, dtype=torch.int)
@@ -7912,8 +7923,46 @@ def set_headstand_spawn_state(
     mask = torch.rand(len(env_ids), device=env.device) < near_inverted_prob
     ids = env_ids[mask]
     n = len(ids)
-    if n == 0:
-        return
+    if n > 0:
+        _spawn_inverted(env, ids, tilt_min_deg, tilt_max_deg, root_z, root_z_noise,
+                        joint_noise_std, roll_vel_range, asset)
+
+    stand_ids = env_ids[~mask]
+    if len(stand_ids) > 0 and stand_pitch_max_deg > 0.0:
+        frac = 1.0
+        if stand_pitch_anneal_steps > 0:
+            frac = min(1.0, env.common_step_counter / stand_pitch_anneal_steps)
+        max_deg = stand_pitch_max_deg * (1.0 - frac)
+        if max_deg > 0.0:
+            t = torch.rand(len(stand_ids), device=env.device) * math.radians(max_deg)
+            quat = torch.stack([torch.cos(t * 0.5), torch.zeros_like(t),
+                                torch.sin(t * 0.5), torch.zeros_like(t)], dim=1)
+            # Lift the root so pivoting about the root keeps the feet at
+            # floor level instead of sinking them into the terrain.
+            env.sim.data.qpos[stand_ids, 2] += 0.115 * (1.0 - torch.cos(t))
+            env.sim.data.qpos[stand_ids, 3:7] = quat
+            env.sim.data.qvel[stand_ids, 4] = stand_pitch_vel * t / max(math.radians(stand_pitch_max_deg), 1e-6)
+            accum, frontier, paid = _headstand_state(env)
+            cos_spawn = -torch.cos(t)
+            accum[stand_ids] = cos_spawn
+            frontier[stand_ids] = cos_spawn
+            paid[stand_ids] = cos_spawn
+            env._hs_prev_cos[stand_ids] = cos_spawn
+            env._hs_prev_supported[stand_ids] = True
+
+
+def _spawn_inverted(
+    env: ManagerBasedRlEnv,
+    ids: torch.Tensor,
+    tilt_min_deg: float,
+    tilt_max_deg: float,
+    root_z: float,
+    root_z_noise: float,
+    joint_noise_std: float,
+    roll_vel_range: tuple,
+    asset: Entity,
+) -> None:
+    n = len(ids)
 
     tilt = torch.rand(n, device=env.device) * math.radians(tilt_max_deg - tilt_min_deg) + math.radians(tilt_min_deg)
     yaw = torch.rand(n, device=env.device) * 2 * np.pi - np.pi
