@@ -8136,3 +8136,291 @@ def headstand_exit_progress(
     env._hx_prev_cos = cos_dev
     env._hx_prev_supported = supported
     return pay
+
+
+# --- basketball: balancing on a free-rolling ball (ported from --------------
+# Vottivott/microduck-playground feature/basketball) --------------------------
+
+from types import SimpleNamespace as _SimpleNamespace
+
+from mjlab.managers.action_manager import ActionTerm as _ActionTerm, ActionTermCfg as _ActionTermCfg
+
+
+def wrestle_tilt(env: ManagerBasedRlEnv, name: str) -> torch.Tensor:
+    g = torch.nan_to_num(env.scene[name].data.projected_gravity_b, nan=0.0)
+    return torch.acos(torch.clamp(-g[:, 2], -1.0, 1.0))
+
+
+def wrestle_upright(env: ManagerBasedRlEnv, std: float = 0.3) -> torch.Tensor:
+    g = torch.nan_to_num(env.scene["robot"].data.projected_gravity_b, nan=0.0)
+    return torch.exp(-(g[:, 0] ** 2 + g[:, 1] ** 2) / (std * std))
+
+
+def _quat_from_yaw_pitch_roll(yaw: torch.Tensor, pitch: torch.Tensor, roll: torch.Tensor) -> torch.Tensor:
+    cy, sy = torch.cos(0.5 * yaw), torch.sin(0.5 * yaw)
+    cp, sp = torch.cos(0.5 * pitch), torch.sin(0.5 * pitch)
+    cr, sr = torch.cos(0.5 * roll), torch.sin(0.5 * roll)
+    return torch.stack(
+        (cy * cp * cr + sy * sp * sr, cy * cp * sr - sy * sp * cr, cy * sp * cr + sy * cp * sr, sy * cp * cr - cy * sp * sr),
+        dim=-1,
+    )
+
+
+def _quat_rotate(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    w, x, y, z = q.unbind(-1)
+    qv = torch.stack((x, y, z), dim=-1)
+    t = 2.0 * torch.cross(qv, v, dim=-1)
+    return v + w[:, None] * t + torch.cross(qv, t, dim=-1)
+
+
+def _bb_place_duck(env, name: str, env_ids, xy, z, yaw, tilt_noise_deg: float, joint_noise: float):
+    """Root pose (small tilt noise) + default joints (noise on the servos)."""
+    n, dev = len(env_ids), env.device
+    asset: Entity = env.scene[name]
+    pitch = (torch.rand(n, device=dev) * 2.0 - 1.0) * math.radians(tilt_noise_deg)
+    roll = (torch.rand(n, device=dev) * 2.0 - 1.0) * math.radians(tilt_noise_deg)
+    quat = _quat_from_yaw_pitch_roll(yaw, pitch, roll)
+    pos = torch.cat((xy, z), dim=-1)
+    asset.write_root_link_pose_to_sim(torch.cat((pos, quat), dim=-1), env_ids=env_ids)
+    asset.write_root_link_velocity_to_sim(torch.zeros(n, 6, device=dev), env_ids=env_ids)
+    joint_pos = asset.data.default_joint_pos[env_ids].clone()
+    if joint_pos.shape[1] > 0:
+        servo = _servo_joint_ids(env, asset)
+        if len(servo) > 0:
+            joint_pos[:, servo] += (torch.rand(n, len(servo), device=dev) * 2.0 - 1.0) * joint_noise
+        asset.write_joint_state_to_sim(joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
+    return quat
+
+
+def _bb_state(env: ManagerBasedRlEnv) -> _SimpleNamespace:
+    state = getattr(env, "_basketball_state", None)
+    if state is None:
+        state = _SimpleNamespace(
+            hold=torch.ones(env.num_envs, device=env.device),  # 1 = fully held, 0 = free ball
+            level=torch.zeros(env.num_envs, dtype=torch.long, device=env.device),
+        )
+        env._basketball_state = state
+    return state
+
+
+def _bb_ball_pos(env: ManagerBasedRlEnv) -> torch.Tensor:
+    return torch.nan_to_num(env.scene["ball"].data.root_link_pos_w, nan=0.0)
+
+
+def basketball_state(env: ManagerBasedRlEnv, pos_scale: float = 3.0, vel_scale: float = 1.0) -> torch.Tensor:
+    """6-D block for the ``body_command`` slot: ball centre relative to the
+    duck's root, in the base frame (3), ball linear velocity in the base frame
+    (xy, 2) and the ball's rolling rate about the base y axis (1)."""
+    robot = env.scene["robot"]
+    ball = env.scene["ball"]
+    q = robot.data.root_link_quat_w
+    rel_b = quat_apply_inverse(q, _bb_ball_pos(env) - robot.data.root_link_pos_w)
+    v_b = quat_apply_inverse(q, torch.nan_to_num(ball.data.root_link_lin_vel_w, nan=0.0))
+    w_b = quat_apply_inverse(q, torch.nan_to_num(ball.data.root_link_ang_vel_w, nan=0.0))
+    obs = torch.cat((rel_b * pos_scale, v_b[:, :2] * vel_scale, w_b[:, 1:2] * 0.2), dim=-1)
+    return torch.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def basketball_centered(env: ManagerBasedRlEnv, std: float = 0.04) -> torch.Tensor:
+    """Gaussian on the horizontal offset root <-> ball centre (mass over the ball)."""
+    d = _bb_ball_pos(env)[:, :2] - env.scene["robot"].data.root_link_pos_w[:, :2]
+    return torch.exp(-(d * d).sum(dim=-1) / (std * std))
+
+
+def basketball_feet_on_ball(
+    env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg, ball_radius: float = 0.12, sole_gap: float = 0.012, std: float = 0.02
+) -> torch.Tensor:
+    """Per-foot Gaussian on (|foot site - ball centre| - (R + gap)); both soles
+    resting on the ball pay 1, a lifted or dangling foot pays ~0 for that foot."""
+    robot = env.scene[asset_cfg.name]
+    feet = robot.data.site_pos_w[:, asset_cfg.site_ids, :]
+    d = torch.linalg.norm(feet - _bb_ball_pos(env)[:, None, :], dim=-1) - (ball_radius + sole_gap)
+    return torch.exp(-(d * d) / (std * std)).mean(dim=-1)
+
+
+def basketball_height(
+    env: ManagerBasedRlEnv, ball_radius: float = 0.12, root_height: float = 0.125, std: float = 0.03
+) -> torch.Tensor:
+    """Gaussian on the root height above the ball centre (standing tall on the apex)."""
+    dz = env.scene["robot"].data.root_link_pos_w[:, 2] - _bb_ball_pos(env)[:, 2] - (ball_radius + root_height)
+    return torch.exp(-(dz * dz) / (std * std))
+
+
+def basketball_ball_speed_l2(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Squared horizontal ball speed (>= 0, use a negative weight): keeps the
+    ball quiet at zero command; small weight so commanded rolling still pays."""
+    v = torch.nan_to_num(env.scene["ball"].data.root_link_lin_vel_w[:, :2], nan=0.0)
+    return (v * v).sum(dim=-1)
+
+
+def basketball_fell(
+    env: ManagerBasedRlEnv,
+    ball_radius: float = 0.12,
+    fall_tilt_deg: float = 55.0,
+    min_height: float = 0.05,
+    max_offset: float = 0.16,
+) -> torch.Tensor:
+    """Off the ball: root too low above the ball centre, root horizontally off
+    the ball, or tilted past ``fall_tilt_deg``."""
+    robot = env.scene["robot"]
+    ball = _bb_ball_pos(env)
+    root = torch.nan_to_num(robot.data.root_link_pos_w, nan=0.0)
+    dz = root[:, 2] - ball[:, 2]
+    off = torch.linalg.norm(root[:, :2] - ball[:, :2], dim=-1)
+    tilt = wrestle_tilt(env, "robot")
+    return (dz < ball_radius + min_height) | (off > max_offset) | (tilt > math.radians(fall_tilt_deg))
+
+
+def reset_basketball(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    ball_radius: float = 0.12,
+    root_height: float = 0.125,
+    xy_noise: float = 0.01,
+    yaw_range: tuple[float, float] = (-math.pi, math.pi),
+    tilt_noise_deg: float = 2.0,
+    joint_noise: float = 0.05,
+    ball_vel_noise: float = 0.0,
+) -> None:
+    """Ball at the env origin resting on the floor, duck standing on its apex
+    (root at 2R + root_height), random yaw, small pose/joint noise."""
+    n, dev = len(env_ids), env.device
+    origins = env.scene.env_origins[env_ids]
+    ball: Entity = env.scene["ball"]
+    bpos = origins + torch.tensor([0.0, 0.0, ball_radius + 0.001], device=dev)
+    quat_i = torch.zeros(n, 4, device=dev)
+    quat_i[:, 0] = 1.0
+    ball.write_root_link_pose_to_sim(torch.cat((bpos, quat_i), dim=-1), env_ids=env_ids)
+    vel = torch.zeros(n, 6, device=dev)
+    if ball_vel_noise > 0:
+        vel[:, :2] = (torch.rand(n, 2, device=dev) * 2.0 - 1.0) * ball_vel_noise
+    ball.write_root_link_velocity_to_sim(vel, env_ids=env_ids)
+    state = _bb_state(env)
+    if not hasattr(state, "anchor"):
+        state.anchor = torch.zeros(env.num_envs, 3, device=dev)
+    state.anchor[env_ids] = bpos
+    xy = origins[:, :2] + (torch.rand(n, 2, device=dev) * 2.0 - 1.0) * xy_noise
+    z = (origins[:, 2] + 2.0 * ball_radius + root_height + 0.003)[:, None]
+    yaw = torch.rand(n, device=dev) * (yaw_range[1] - yaw_range[0]) + yaw_range[0]
+    _bb_place_duck(env, "robot", env_ids, xy, z, yaw, tilt_noise_deg, joint_noise)
+
+
+@_dataclass(kw_only=True)
+class BallHoldActionCfg(_ActionTermCfg):
+    """Zero-width action term: a per-env spring/damper wrench pulling the ball
+    back to its spawn point and killing its spin, scaled by ``hold`` in [0, 1]
+    from ``_bb_state``.  hold=1 pins the ball like a weld (a real mjwarp weld
+    equality is shared by all worlds and cannot be per-env); hold=0 is a free
+    ball.  The curriculum lowers ``hold`` in stages."""
+
+    entity_name: str = "ball"
+    kp: float = 400.0  # N/m at hold=1
+    kd: float = 20.0  # N s/m at hold=1
+    kd_rot: float = 0.2  # N m s at hold=1
+    levels: tuple[float, ...] = (1.0, 0.3, 0.1, 0.03, 0.0)
+    # Training wheels on the duck (spawn probe: the passive default pose
+    # topples off even a pinned ball within 1 s - a sole on a sphere has no
+    # sagittal support polygon, balance must be active).  At hold=1 an upright
+    # spring/damper on the trunk and a horizontal spring toward the ball centre
+    # keep the duck up; both fade with the same hold level.
+    duck_name: str = "robot"
+    duck_kp_rot: float = 3.0  # N m/rad restoring torque toward world up (gravity torque at 30 deg ~0.5 N m)
+    duck_kd_rot: float = 0.08  # N m s
+    duck_kp: float = 40.0  # N/m root xy toward the ball centre
+    duck_kd: float = 4.0  # N s/m
+
+    def build(self, env: ManagerBasedRlEnv) -> "BallHoldAction":
+        return BallHoldAction(self, env)
+
+
+class BallHoldAction(_ActionTerm):
+    cfg: BallHoldActionCfg
+
+    def __init__(self, cfg: BallHoldActionCfg, env: ManagerBasedRlEnv):
+        super().__init__(cfg, env)
+        self._raw = torch.zeros(self.num_envs, 0, device=self.device)
+        self._entity: Entity = env.scene[cfg.entity_name]
+        self._duck: Entity = env.scene[cfg.duck_name]
+        state = _bb_state(env)
+        state.hold[:] = float(cfg.levels[0])
+        self._force = None
+        self._up = torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(self.num_envs, 3)
+
+    @property
+    def action_dim(self) -> int:
+        return 0
+
+    @property
+    def raw_action(self) -> torch.Tensor:
+        return self._raw
+
+    def process_actions(self, actions: torch.Tensor) -> None:
+        del actions
+        state = _bb_state(self._env)
+        if not hasattr(state, "anchor"):
+            return
+        pos = torch.nan_to_num(self._entity.data.root_link_pos_w, nan=0.0)
+        v = torch.nan_to_num(self._entity.data.root_link_lin_vel_w, nan=0.0)
+        w = torch.nan_to_num(self._entity.data.root_link_ang_vel_w, nan=0.0)
+        hold = state.hold[:, None]
+        f = hold * (-self.cfg.kp * (pos - state.anchor) - self.cfg.kd * v)
+        f[:, 2] = hold[:, 0] * (-self.cfg.kd * v[:, 2])  # no vertical spring (the floor holds it)
+        t = hold * (-self.cfg.kd_rot * w)
+        self._force = f[:, None, :]
+        self._torque = t[:, None, :]
+        # duck assist: restoring torque (up x world_up) - damping, xy spring to the ball
+        dq = self._duck.data.root_link_quat_w
+        up = _quat_rotate(dq, self._up)
+        dw = torch.nan_to_num(self._duck.data.root_link_ang_vel_w, nan=0.0)
+        dpos = torch.nan_to_num(self._duck.data.root_link_pos_w, nan=0.0)
+        dv = torch.nan_to_num(self._duck.data.root_link_lin_vel_w, nan=0.0)
+        dt = hold * (self.cfg.duck_kp_rot * torch.cross(up, self._up, dim=-1) - self.cfg.duck_kd_rot * dw)
+        df = hold * (-self.cfg.duck_kp * (dpos - pos) - self.cfg.duck_kd * dv)
+        df[:, 2] = 0.0
+        self._duck_force = df[:, None, :]
+        self._duck_torque = dt[:, None, :]
+
+    def reset(self, env_ids=None) -> None:
+        return
+
+    def apply_actions(self) -> None:
+        if self._force is None:
+            return
+        self._entity.write_external_wrench_to_sim(self._force, self._torque, body_ids=[0])
+        self._duck.write_external_wrench_to_sim(self._duck_force, self._duck_torque, body_ids=[0])
+
+
+def basketball_hold_curriculum(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor,
+    levels: tuple[float, ...] = (1.0, 0.3, 0.1, 0.03, 0.0),
+    promote_len_s: float = 6.0,
+    demote_len_s: float = 1.5,
+) -> torch.Tensor:
+    """Per-env hold level: promote when the episode ran at least
+    ``promote_len_s`` (balanced through it), demote after quick falls.
+    Returns the mean level (logged as Curriculum/basketball_hold)."""
+    state = _bb_state(env)
+    lengths = env.episode_length_buf[env_ids].float() * env.step_dt
+    up = lengths >= promote_len_s
+    down = lengths < demote_len_s
+    lvl = state.level[env_ids]
+    lvl = torch.where(up, lvl + 1, lvl)
+    lvl = torch.where(down, lvl - 1, lvl)
+    lvl = lvl.clamp(0, len(levels) - 1)
+    state.level[env_ids] = lvl
+    table = torch.tensor(levels, device=env.device)
+    state.hold[env_ids] = table[lvl]
+    return state.level.float().mean()
+
+
+def basketball_body_pad(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Zero pad for the 6-D body_command slot: the blind variant (MICRODUCK_BB_BLIND=1)
+    gives the actor no ball state at all - only the shared 61-D proprioception
+    contract - while the critic keeps ``basketball_state`` (privileged critic)."""
+    return torch.zeros(env.num_envs, 6, device=env.device)
+
+
+def basketball_head_pad(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """Zero pad for the 4-D head_command slot (61-D contract, no head command here)."""
+    return torch.zeros(env.num_envs, 4, device=env.device)

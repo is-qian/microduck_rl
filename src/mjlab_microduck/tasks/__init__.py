@@ -85,6 +85,20 @@ from .microduck_roulade_env_cfg import (
 )
 from .backlash import make_backlash_variant
 
+from .microduck_basketball_env_cfg import (
+    make_microduck_basketball_env_cfg,
+    MicroduckBasketballRlCfg,
+)
+
+# Basketball circus balance — duck on a free-rolling ball (blind LSTM actor).
+register_mjlab_task(
+    task_id="Mjlab-Basketball-MicroDuck",
+    env_cfg=make_microduck_basketball_env_cfg(),
+    play_env_cfg=make_microduck_basketball_env_cfg(play=True),
+    rl_cfg=MicroduckBasketballRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
 # Standard velocity task
 register_mjlab_task(
     task_id="Mjlab-Velocity-Flat-MicroDuck",
