@@ -9,7 +9,7 @@ Per env:
              remaining steps until 60 s
 
 Usage:
-  uv run python scripts/eval_headstand.py --checkpoint <model.pt> [--num-envs 256]
+  uv run python scripts/eval_headstand.py --checkpoint <model.pt> [--num-envs 256] [--video]
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ import torch
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
+from mjlab.utils.wrappers import VideoRecorder
 
 TASK_ID = "Mjlab-HeadStand-Flat-MicroDuck"
 HOLD_COS_MIN = math.cos(math.radians(20.0))
@@ -38,6 +39,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--checkpoint", type=Path, required=True)
     ap.add_argument("--num-envs", type=int, default=256)
+    ap.add_argument("--video", action="store_true", help="record env 0 (entry + first hold seconds)")
+    ap.add_argument("--video-dir", type=Path, default=Path("logs/eval_videos"))
+    ap.add_argument("--video-length", type=int, default=750)
     args = ap.parse_args()
 
     env_cfg = load_env_cfg(TASK_ID, play=True)
@@ -47,7 +51,20 @@ def main() -> int:
     env_cfg.events["headstand_spawn"].params["near_inverted_prob"] = 0.0
 
     device = "cuda:0"
-    env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+    if args.video:
+        env_cfg.viewer.width = 1280
+        env_cfg.viewer.height = 720
+    env = ManagerBasedRlEnv(
+        cfg=env_cfg, device=device, render_mode="rgb_array" if args.video else None
+    )
+    if args.video:
+        env = VideoRecorder(
+            env,
+            video_folder=args.video_dir,
+            step_trigger=lambda step: step == 0,
+            video_length=args.video_length,
+            disable_logger=True,
+        )
     agent_cfg = load_rl_cfg(TASK_ID)
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
