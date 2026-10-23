@@ -65,7 +65,7 @@ def main() -> int:
     n = args.num_envs
     hold_hist = torch.zeros(n, total_steps, dtype=torch.bool, device=device)
 
-    obs = env.reset()
+    obs, _ = env.reset()
     with torch.inference_mode():
         for step in range(total_steps):
             obs = policy(obs)
