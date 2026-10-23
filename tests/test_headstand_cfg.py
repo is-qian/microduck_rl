@@ -43,6 +43,7 @@ def test_headstand_rewards_present():
         "pose_legs_home",
         "gentle_motion",
         "no_flight",
+        "feet_height",
     ):
         assert name in cfg.rewards, f"missing reward: {name}"
 

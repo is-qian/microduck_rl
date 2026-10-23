@@ -66,6 +66,9 @@ IMU_ORIENTATION_RANDOMIZATION_ANGLE = 6.0
 EPISODE_LENGTH_S = 8.0
 
 _LEG_JOINTS = [0, 1, 2, 3, 4, 9, 10, 11, 12, 13]
+# Fully straight legs during the hold: hip_roll/hip_pitch/knee/ankle → 0
+# (HOME has a slight zig-zag bend; 0 extends the leg along the trunk axis).
+_STRAIGHT_LEG_OVERRIDES = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0, 10: 0.0, 11: 0.0, 12: 0.0, 13: 0.0}
 
 # Head-ground contact force (N) above which the hold gate opens. Well below
 # weight-at-rest (~8 N) so noisy balance contact counts.
@@ -224,6 +227,19 @@ def make_microduck_headstand_env_cfg(
         params={
             "std": 0.5,
             "joint_indices": _LEG_JOINTS,
+            "target_overrides": _STRAIGHT_LEG_OVERRIDES,
+            "feet_sensor_name": "feet_ground_contact",
+            "head_sensor_name": "head_ground_contact",
+            "min_force": HEADSTAND_MIN_FORCE,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
+    )
+
+    # Feet as high as possible during the hold (legs extended upward).
+    cfg.rewards["feet_height"] = RewardTermCfg(
+        func=microduck_mdp.headstand_feet_height,
+        weight=4.0,
+        params={
             "feet_sensor_name": "feet_ground_contact",
             "head_sensor_name": "head_ground_contact",
             "min_force": HEADSTAND_MIN_FORCE,

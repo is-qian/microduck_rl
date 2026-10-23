@@ -7856,6 +7856,7 @@ def headstand_leg_pose_gated(
     feet_sensor_name: str,
     head_sensor_name: str,
     min_force: float,
+    target_overrides: Optional[dict] = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """HOME leg pose as a multiplicative composite: pose × sharp inversion
@@ -7863,7 +7864,7 @@ def headstand_leg_pose_gated(
     only matters for keeping the CoM over the head DURING the hold — paying
     it anywhere else is farmable (v1: lying; v2: flopped, feet tucked; v4:
     face-up flop with legs overhead)."""
-    pose = pose_target_match(env, std=std, joint_indices=joint_indices, target_overrides=None)
+    pose = pose_target_match(env, std=std, joint_indices=joint_indices, target_overrides=target_overrides)
     # Sharp gaussian, not a smoothstep: a face-up flop (head contact, feet
     # air, ~45° off inverted) passes the smoothstep but reads ≈0 here.
     cos_gate = body_inverted_gaussian(env, std=0.3, asset_cfg=asset_cfg)
@@ -7954,3 +7955,31 @@ def headstand_flight_penalty(
         if c is not None:
             supported = supported | c
     return -(~supported).float()
+
+
+def headstand_feet_height(
+    env: ManagerBasedRlEnv,
+    feet_sensor_name: str,
+    head_sensor_name: str,
+    min_force: float,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mean ankle height (m) while the hold gate is active — legs straight
+    and as high as possible. Bounded by leg length, so no jackpot."""
+    asset: Entity = env.scene[asset_cfg.name]
+    if not hasattr(env, "_hs_ankle_ids"):
+        ids, _ = asset.find_bodies("(ankle_left|ankle_right)")
+        env._hs_ankle_ids = ids
+    feet_z = asset.data.body_link_pos_w[:, env._hs_ankle_ids, 2].mean(dim=-1)
+    origin_z = env.scene.terrain.env_origins[:, 2]
+    feet_z = torch.nan_to_num(feet_z - origin_z, nan=0.0)
+    gate = headstand_hold(
+        env,
+        head_sensor_name=head_sensor_name,
+        feet_sensor_name=feet_sensor_name,
+        std=math.pi,  # gate only
+        min_force=min_force,
+        require_head_top=True,
+        asset_cfg=asset_cfg,
+    )
+    return feet_z * gate
