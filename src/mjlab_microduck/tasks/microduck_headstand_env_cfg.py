@@ -289,12 +289,15 @@ def make_microduck_headstand_env_cfg(
     # POSITIVE weight: trunk_vertical_accel_penalty already returns -|a_z|.
     cfg.rewards["gentle_motion"] = RewardTermCfg(
         func=microduck_mdp.trunk_vertical_accel_penalty,
-        weight=0.005,
+        weight=0.02,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",))},
     )
 
-    # Regulariser tuning matched to standup's transferred values.
-    cfg.rewards["action_rate_l2"] = RewardTermCfg(func=mdp.action_rate_l2, weight=-0.1)
+    # Minimal, low-amplitude motion requested: smooth control signal, no
+    # joint flailing. Weights stay modest so the roll keeps enough authority.
+    cfg.rewards["action_rate_l2"] = RewardTermCfg(func=mdp.action_rate_l2, weight=-0.2)
+    cfg.rewards["joint_vel_l2"] = RewardTermCfg(func=mdp.joint_vel_l2, weight=-0.001)
+    cfg.rewards["joint_acc_l2"] = RewardTermCfg(func=mdp.joint_acc_l2, weight=-2.5e-7)
     cfg.rewards["joint_torque_rate_l2"] = RewardTermCfg(
         func=microduck_mdp.joint_torque_rate_l2, weight=0.0  # curriculum later
     )
