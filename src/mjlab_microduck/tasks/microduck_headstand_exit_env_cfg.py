@@ -129,6 +129,9 @@ def make_microduck_headstand_exit_env_cfg(
         func=microduck_mdp.headstand_exit_progress,
         weight=4.0,
         params={
+            # Fastest fully-paid exit = 2.0 / 0.04 steps = 1.0 s; rotating
+            # faster forfeits the excess, so a hop pays less than a fold.
+            "max_paid_per_step": 0.04,
             "feet_sensor_name": "feet_ground_contact",
             "head_sensor_name": "head_ground_contact",
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
@@ -165,12 +168,12 @@ def make_microduck_headstand_exit_env_cfg(
     # POSITIVE weights: these are self-negating penalties.
     cfg.rewards["gentle_motion"] = RewardTermCfg(
         func=microduck_mdp.trunk_vertical_accel_penalty,
-        weight=0.02,
+        weight=0.05,
         params={"asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",))},
     )
     cfg.rewards["no_flight"] = RewardTermCfg(
         func=microduck_mdp.headstand_flight_penalty,
-        weight=1.0,
+        weight=5.0,
         params={
             "feet_sensor_name": "feet_ground_contact",
             "head_sensor_name": "head_ground_contact",

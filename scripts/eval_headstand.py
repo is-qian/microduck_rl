@@ -7,6 +7,8 @@ Per env:
              active cumulatively ≥ 1 s within the first 10 s
   stable   — after the first sustained hold, hold active ≥ 95% of the
              remaining steps until 60 s
+  flight-free — never fully unsupported (no foot AND no head contact); the
+             entry must be a supported roll, not a hop
 
 Usage:
   uv run python scripts/eval_headstand.py --checkpoint <model.pt> [--num-envs 256] [--video]
@@ -81,6 +83,7 @@ def main() -> int:
 
     n = args.num_envs
     hold_hist = torch.zeros(n, total_steps, dtype=torch.bool, device=device)
+    flight_any = torch.zeros(n, dtype=torch.bool, device=device)
 
     obs, _ = env.reset()
     with torch.inference_mode():
@@ -101,6 +104,7 @@ def main() -> int:
                 feet_found = feet_found.sum(dim=-1)
             hold = (head_force > MIN_FORCE) & (feet_found <= 0.0) & (cos_dev > HOLD_COS_MIN)
             hold_hist[:, step] = hold
+            flight_any |= ~((feet_found > 0.0) | (head_force > MIN_FORCE))
 
             if step % int(10 * hz) == 0:
                 print(f"t={step / hz:5.1f}s  holding: {hold.sum().item():4d}/{n}")
@@ -134,9 +138,10 @@ def main() -> int:
 
     print(f"\n=== {args.checkpoint.name} | {n} envs | standing start, 60 s ===")
     print(f"reached headstand within {ENTRY_WINDOW_S:.0f}s : {reached.sum().item():4d}/{n} ({reached.float().mean():.1%})")
-    both = reached & stable
+    print(f"flight-free entry                 : {(~flight_any).sum().item():4d}/{n} ({(~flight_any).float().mean():.1%})")
+    both = reached & stable & ~flight_any
     print(f"stable hold to 60 s               : {stable.sum().item():4d}/{n} ({stable.float().mean():.1%})")
-    print(f"SUCCESS (reached + stable)        : {both.sum().item():4d}/{n} ({both.float().mean():.1%})")
+    print(f"SUCCESS (all three)               : {both.sum().item():4d}/{n} ({both.float().mean():.1%})")
     return 0
 
 
