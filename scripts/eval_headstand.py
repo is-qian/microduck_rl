@@ -7,8 +7,9 @@ Per env:
              active cumulatively ≥ 1 s within the first 10 s
   stable   — after the first sustained hold, hold active ≥ 95% of the
              remaining steps until 60 s
-  flight-free — never fully unsupported (no foot AND no head contact); the
-             entry must be a supported roll, not a hop
+  flight-free — no sustained run without ANY robot-body ground contact
+             (a body-supported roll keeps contact; only a real hop reads
+             as fully unsupported)
 
 Usage:
   uv run python scripts/eval_headstand.py --checkpoint <model.pt> [--num-envs 256] [--video]
@@ -25,6 +26,7 @@ import torch
 
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import RslRlVecEnvWrapper
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.registry import load_env_cfg, load_rl_cfg, load_runner_cls
 from mjlab.utils.wrappers import VideoRecorder
 
@@ -51,6 +53,18 @@ def main() -> int:
     env_cfg.episode_length_s = EPISODE_S
     # All envs start standing: the deployment scenario.
     env_cfg.events["headstand_spawn"].params["near_inverted_prob"] = 0.0
+    # Whole-robot ground contact: the true support signal (feet/head sensors
+    # alone read a back-supported roll phase as unsupported).
+    env_cfg.scene.sensors = tuple(env_cfg.scene.sensors) + (
+        ContactSensorCfg(
+            name="body_ground_contact",
+            primary=ContactMatch(mode="subtree", pattern="trunk_base", entity="robot"),
+            secondary=ContactMatch(mode="body", pattern="terrain"),
+            fields=("found",),
+            reduce="none",
+            num_slots=1,
+        ),
+    )
 
     device = "cuda:0"
     if args.video:
@@ -83,7 +97,8 @@ def main() -> int:
 
     n = args.num_envs
     hold_hist = torch.zeros(n, total_steps, dtype=torch.bool, device=device)
-    flight_any = torch.zeros(n, dtype=torch.bool, device=device)
+    flight_runs = torch.zeros(n, dtype=torch.long, device=device)
+    cur_run = torch.zeros(n, dtype=torch.long, device=device)
 
     obs, _ = env.reset()
     with torch.inference_mode():
@@ -104,7 +119,13 @@ def main() -> int:
                 feet_found = feet_found.sum(dim=-1)
             hold = (head_force > MIN_FORCE) & (feet_found <= 0.0) & (cos_dev > HOLD_COS_MIN)
             hold_hist[:, step] = hold
-            flight_any |= ~((feet_found > 0.0) | (head_force > MIN_FORCE))
+            body_found = raw.scene.sensors["body_ground_contact"].data.found
+            body_found = torch.nan_to_num(body_found, nan=0.0)
+            if body_found.dim() > 1:
+                body_found = body_found.sum(dim=-1)
+            unsupported = body_found <= 0.0
+            cur_run = torch.where(unsupported, cur_run + 1, torch.zeros_like(cur_run))
+            flight_runs = torch.maximum(flight_runs, cur_run)
 
             if step % int(10 * hz) == 0:
                 print(f"t={step / hz:5.1f}s  holding: {hold.sum().item():4d}/{n}")
@@ -138,8 +159,10 @@ def main() -> int:
 
     print(f"\n=== {args.checkpoint.name} | {n} envs | standing start, 60 s ===")
     print(f"reached headstand within {ENTRY_WINDOW_S:.0f}s : {reached.sum().item():4d}/{n} ({reached.float().mean():.1%})")
-    print(f"flight-free entry                 : {(~flight_any).sum().item():4d}/{n} ({(~flight_any).float().mean():.1%})")
-    both = reached & stable & ~flight_any
+    flight_free = flight_runs <= 2  # >2 fully-unsupported steps (~40 ms) = real hop
+    print(f"flight-free entry (<=2 steps)     : {flight_free.sum().item():4d}/{n} ({flight_free.float().mean():.1%})")
+    print(f"max unsupported run (steps)       : median {flight_runs.float().median():.0f}  p90 {flight_runs.float().quantile(0.9):.0f}  max {flight_runs.max().item()}")
+    both = reached & stable & flight_free
     print(f"stable hold to 60 s               : {stable.sum().item():4d}/{n} ({stable.float().mean():.1%})")
     print(f"SUCCESS (all three)               : {both.sum().item():4d}/{n} ({both.float().mean():.1%})")
     return 0

@@ -96,11 +96,22 @@ def make_microduck_headstand_exit_env_cfg(
         num_slots=1,
     )
 
+    # Whole-robot ground contact: the true support signal (a chest-supported
+    # fold phase is NOT flight).
+    body_ground_cfg = ContactSensorCfg(
+        name="body_ground_contact",
+        primary=ContactMatch(mode="subtree", pattern="trunk_base", entity="robot"),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found",),
+        reduce="none",
+        num_slots=1,
+    )
+
     # ── Base config ───────────────────────────────────────────────────────────
     cfg = make_velocity_env_cfg()
 
     cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG}
-    cfg.scene.sensors = (feet_ground_cfg, head_ground_cfg, self_collision_cfg)
+    cfg.scene.sensors = (feet_ground_cfg, head_ground_cfg, self_collision_cfg, body_ground_cfg)
     cfg.viewer.body_name = "trunk_base"
 
     cfg.episode_length_s = EPISODE_LENGTH_S
@@ -134,6 +145,7 @@ def make_microduck_headstand_exit_env_cfg(
             "max_paid_per_step": 0.04,
             "feet_sensor_name": "feet_ground_contact",
             "head_sensor_name": "head_ground_contact",
+            "support_sensor_name": "body_ground_contact",
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
         },
     )
@@ -177,6 +189,7 @@ def make_microduck_headstand_exit_env_cfg(
         params={
             "feet_sensor_name": "feet_ground_contact",
             "head_sensor_name": "head_ground_contact",
+            "support_sensor_name": "body_ground_contact",
         },
     )
 

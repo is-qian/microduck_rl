@@ -7818,6 +7818,7 @@ def headstand_progress(
     feet_sensor_name: str,
     head_sensor_name: str,
     max_paid_per_step: float = 0.1,
+    support_sensor_name: Optional[str] = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Potential-based bootstrap with a SUPPORT-GATED integrator: the
@@ -7834,10 +7835,16 @@ def headstand_progress(
     feet = _sensor_any_contact(env, feet_sensor_name)
     head = _sensor_any_contact(env, head_sensor_name)
     supported = torch.ones_like(cos_dev, dtype=torch.bool)
-    if feet is not None:
-        supported = feet
-    if head is not None:
-        supported = supported | head
+    body = _sensor_any_contact(env, support_sensor_name) if support_sensor_name else None
+    if body is not None:
+        # Whole-body contact: a back-supported roll phase keeps earning,
+        # only true flight pauses the integrator.
+        supported = body
+    else:
+        if feet is not None:
+            supported = feet
+        if head is not None:
+            supported = supported | head
     ok = supported & env._hs_prev_supported
     delta = torch.where(ok, cos_dev - env._hs_prev_cos, torch.zeros_like(cos_dev))
     env._hs_accum = accum + torch.nan_to_num(delta, nan=0.0)
@@ -7945,10 +7952,16 @@ def headstand_flight_penalty(
     env: ManagerBasedRlEnv,
     feet_sensor_name: str,
     head_sensor_name: str,
+    support_sensor_name: Optional[str] = None,
 ) -> torch.Tensor:
     """Self-negating (≤0): -1 while fully unsupported (no foot AND no head
     ground contact). The entry must be a smooth supported tip-over — never
     airborne. Use a POSITIVE weight."""
+    if support_sensor_name is not None:
+        body = _sensor_any_contact(env, support_sensor_name)
+        if body is not None:
+            # Whole-body contact: a roll supported by the back is NOT flight.
+            return -(~body).float()
     supported = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     for name in (feet_sensor_name, head_sensor_name):
         c = _sensor_any_contact(env, name)
@@ -8020,6 +8033,7 @@ def headstand_exit_progress(
     feet_sensor_name: str,
     head_sensor_name: str,
     max_paid_per_step: float = 0.1,
+    support_sensor_name: Optional[str] = None,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Mirror of ``headstand_progress`` on the UPRIGHT cosine: a
@@ -8034,10 +8048,14 @@ def headstand_exit_progress(
     feet = _sensor_any_contact(env, feet_sensor_name)
     head = _sensor_any_contact(env, head_sensor_name)
     supported = torch.ones_like(cos_dev, dtype=torch.bool)
-    if feet is not None:
-        supported = feet
-    if head is not None:
-        supported = supported | head
+    body = _sensor_any_contact(env, support_sensor_name) if support_sensor_name else None
+    if body is not None:
+        supported = body
+    else:
+        if feet is not None:
+            supported = feet
+        if head is not None:
+            supported = supported | head
     ok = supported & env._hx_prev_supported
     delta = torch.where(ok, cos_dev - env._hx_prev_cos, torch.zeros_like(cos_dev))
     env._hx_accum = env._hx_accum + torch.nan_to_num(delta, nan=0.0)

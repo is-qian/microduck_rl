@@ -143,11 +143,23 @@ def make_microduck_headstand_env_cfg(
         num_slots=1,
     )
 
+    # Whole-robot ground contact: the true support signal. Feet+head alone
+    # read a back-supported roll phase as flight, which v8's policy exploited
+    # with a real hop (median 11 fully-airborne steps in eval).
+    body_ground_cfg = ContactSensorCfg(
+        name="body_ground_contact",
+        primary=ContactMatch(mode="subtree", pattern="trunk_base", entity="robot"),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found",),
+        reduce="none",
+        num_slots=1,
+    )
+
     # ── Base config ───────────────────────────────────────────────────────────
     cfg = make_velocity_env_cfg()
 
     cfg.scene.entities = {"robot": MICRODUCK_STANDUP_ROBOT_CFG}
-    cfg.scene.sensors = (feet_ground_cfg, head_ground_cfg, self_collision_cfg)
+    cfg.scene.sensors = (feet_ground_cfg, head_ground_cfg, self_collision_cfg, body_ground_cfg)
     cfg.viewer.body_name = "trunk_base"
 
     cfg.episode_length_s = EPISODE_LENGTH_S
@@ -180,8 +192,12 @@ def make_microduck_headstand_env_cfg(
         func=microduck_mdp.headstand_progress,
         weight=5.0,
         params={
+            # Slow roll: fastest fully-paid entry = 2.0/0.04 steps = 1.0 s;
+            # rotating faster forfeits the excess.
+            "max_paid_per_step": 0.04,
             "feet_sensor_name": "feet_ground_contact",
             "head_sensor_name": "head_ground_contact",
+            "support_sensor_name": "body_ground_contact",
             "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
         },
     )
@@ -205,10 +221,11 @@ def make_microduck_headstand_env_cfg(
     # phase). Self-negating penalty → POSITIVE weight.
     cfg.rewards["no_flight"] = RewardTermCfg(
         func=microduck_mdp.headstand_flight_penalty,
-        weight=0.5,
+        weight=5.0,
         params={
             "feet_sensor_name": "feet_ground_contact",
             "head_sensor_name": "head_ground_contact",
+            "support_sensor_name": "body_ground_contact",
         },
     )
 
