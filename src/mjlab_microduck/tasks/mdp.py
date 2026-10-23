@@ -7970,6 +7970,65 @@ def headstand_flight_penalty(
     return -(~supported).float()
 
 
+def _flight_run(env: ManagerBasedRlEnv) -> torch.Tensor:
+    if not hasattr(env, "_flight_run_ctr"):
+        env._flight_run_ctr = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+    return env._flight_run_ctr
+
+
+def reset_flight_run(env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> None:
+    _flight_run(env)[env_ids] = 0
+
+
+def flight_run_terminated(
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    max_steps: int = 5,
+) -> torch.Tensor:
+    """Terminate when fully unsupported (no robot-body ground contact) for
+    more than ``max_steps`` consecutive steps. A hop forfeits the ENTIRE
+    remaining episode annuity — decisive where per-step penalties lose to
+    arriving early. The roll hand-off is 1-2 steps and survives; the v8/v9
+    hop is 10-16 steps and dies. Threshold stays above the inverted-spawn
+    settle (~3 steps from 2 cm)."""
+    ctr = _flight_run(env)
+    body = _sensor_any_contact(env, sensor_name)
+    if body is None:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    env._flight_run_ctr = torch.where(body, torch.zeros_like(ctr), ctr + 1)
+    return env._flight_run_ctr > max_steps
+
+
+def root_z_ceiling_penalty(
+    env: ManagerBasedRlEnv,
+    z_max: float,
+    scale: float = 0.05,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Self-negating: -((z - z_max)/scale)² above the ceiling. Standing is
+    0.115, the hold sits at 0.128, the roll peaks ~0.13 — only a jump
+    exceeds 0.16. Use a POSITIVE weight."""
+    asset: Entity = env.scene[asset_cfg.name]
+    z = asset.data.root_link_pos_w[:, 2] - env.scene.terrain.env_origins[:, 2]
+    over = torch.clamp(z - z_max, min=0.0) / scale
+    return -(over * over)
+
+
+def body_ang_vel_hinge_penalty(
+    env: ManagerBasedRlEnv,
+    max_rate: float,
+    scale: float = 3.5,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Self-negating: -((|ω| - max_rate)/scale)² above the rate — slow roll
+    is free, whipping is taxed. Hold micro-corrections stay far below the
+    hinge. Use a POSITIVE weight."""
+    asset: Entity = env.scene[asset_cfg.name]
+    mag = torch.nan_to_num(torch.linalg.norm(asset.data.root_link_ang_vel_b, dim=-1), nan=0.0)
+    over = torch.clamp(mag - max_rate, min=0.0) / scale
+    return -(over * over)
+
+
 def headstand_feet_height(
     env: ManagerBasedRlEnv,
     feet_sensor_name: str,

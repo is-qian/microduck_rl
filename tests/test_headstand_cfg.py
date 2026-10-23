@@ -55,10 +55,19 @@ def test_penalty_weight_signs():
     assert cfg.rewards["feet_contact_inverted"].weight > 0
     assert cfg.rewards["gentle_motion"].weight > 0
     assert cfg.rewards["no_flight"].weight > 0
+    assert cfg.rewards["root_z_ceiling"].weight > 0
+    assert cfg.rewards["roll_rate_hinge"].weight > 0
     # Task objectives are positive rewards.
     assert cfg.rewards["headstand_progress"].weight > 0
     assert cfg.rewards["headstand_hold"].weight > 0
     assert cfg.rewards["pose_legs_home"].weight > 0
+
+
+def test_flight_termination_present():
+    cfg = make_microduck_headstand_env_cfg()
+    assert "flight" in cfg.terminations
+    assert cfg.terminations["flight"].params["sensor_name"] == "body_ground_contact"
+    assert "reset_flight_run" in cfg.events
 
 
 def test_sim2real_regularisers_kept():

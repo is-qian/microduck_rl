@@ -229,6 +229,28 @@ def make_microduck_headstand_env_cfg(
         },
     )
 
+    # v10: kill the pre-roll jump (v8/v9 trajectory: upright vertical hop to
+    # z=0.175, 10-16 airborne steps, then roll). Dense shapers price the hop;
+    # the flight termination makes it forfeit the whole episode.
+    cfg.rewards["root_z_ceiling"] = RewardTermCfg(
+        func=microduck_mdp.root_z_ceiling_penalty,
+        weight=2.0,
+        params={
+            "z_max": 0.16,
+            "scale": 0.05,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
+    )
+    cfg.rewards["roll_rate_hinge"] = RewardTermCfg(
+        func=microduck_mdp.body_ang_vel_hinge_penalty,
+        weight=0.5,
+        params={
+            "max_rate": 3.5,
+            "scale": 3.5,
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+        },
+    )
+
     cfg.rewards["feet_contact_inverted"] = RewardTermCfg(
         func=microduck_mdp.feet_contact_inverted_penalty,
         weight=1.0,
@@ -396,6 +418,11 @@ def make_microduck_headstand_env_cfg(
         time_out=False,
         params={"sensor_names": ("feet_ground_contact", "head_ground_contact")},
     )
+    cfg.terminations["flight"] = TerminationTermCfg(
+        func=microduck_mdp.flight_run_terminated,
+        time_out=False,
+        params={"sensor_name": "body_ground_contact", "max_steps": 5},
+    )
 
     # ── Events ────────────────────────────────────────────────────────────────
     cfg.events["expand_bam_friction_fields"] = EventTermCfg(
@@ -404,6 +431,10 @@ def make_microduck_headstand_env_cfg(
     )
     cfg.events["reset_action_history"] = EventTermCfg(
         func=microduck_mdp.reset_action_history,
+        mode="reset",
+    )
+    cfg.events["reset_flight_run"] = EventTermCfg(
+        func=microduck_mdp.reset_flight_run,
         mode="reset",
     )
     cfg.events["reset_headstand_state"] = EventTermCfg(
