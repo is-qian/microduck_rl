@@ -7983,3 +7983,67 @@ def headstand_feet_height(
         asset_cfg=asset_cfg,
     )
     return feet_z * gate
+
+
+# ── Headstand exit ──────────────────────────────────────────────────────────
+# Per-env exit state (created lazily, reset by reset_headstand_exit_state):
+#   env._hx_frontier — max-so-far UPRIGHT cosine (progress frontier)
+#   env._hx_paid     — frontier already paid out by headstand_exit_progress
+
+
+def _headstand_exit_state(env: ManagerBasedRlEnv) -> None:
+    if not hasattr(env, "_hx_accum"):
+        # Headstand spawn reads cos_up = -1, so the buffers start at -1 and
+        # the spawn pose itself never pays.
+        z = torch.full((env.num_envs,), -1.0, device=env.device)
+        env._hx_accum = z.clone()
+        env._hx_frontier = z.clone()
+        env._hx_paid = z.clone()
+        env._hx_prev_cos = z.clone()
+        env._hx_prev_supported = torch.ones(env.num_envs, dtype=torch.bool, device=env.device)
+
+
+def reset_headstand_exit_state(env: ManagerBasedRlEnv, env_ids: torch.Tensor) -> None:
+    _headstand_exit_state(env)
+    # Read the actual spawn orientation (may run after the headstand spawn
+    # event, tilt 165-180 deg) so nothing is paid for the spawn pose itself.
+    cos_now = torch.nan_to_num(body_upright_linear(env), nan=-1.0)
+    env._hx_accum[env_ids] = cos_now[env_ids]
+    env._hx_frontier[env_ids] = cos_now[env_ids]
+    env._hx_paid[env_ids] = cos_now[env_ids]
+    env._hx_prev_cos[env_ids] = cos_now[env_ids]
+    env._hx_prev_supported[env_ids] = True
+
+
+def headstand_exit_progress(
+    env: ManagerBasedRlEnv,
+    feet_sensor_name: str,
+    head_sensor_name: str,
+    max_paid_per_step: float = 0.1,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+    """Mirror of ``headstand_progress`` on the UPRIGHT cosine: a
+    support-gated integrator with a per-step payment cap. Rotating from
+    inverted to upright while ground-supported (head and/or feet) pays;
+    kicking free of the ground forfeits the airborne rotation, and any
+    rotation faster than the cap is forfeited — a controlled, supported
+    fold-down is the argmax. Camping inverted and bobbing pay zero; a full
+    supported invert->stand exit pays 2x weight in total."""
+    _headstand_exit_state(env)
+    cos_dev = torch.nan_to_num(body_upright_linear(env, asset_cfg), nan=-1.0)
+    feet = _sensor_any_contact(env, feet_sensor_name)
+    head = _sensor_any_contact(env, head_sensor_name)
+    supported = torch.ones_like(cos_dev, dtype=torch.bool)
+    if feet is not None:
+        supported = feet
+    if head is not None:
+        supported = supported | head
+    ok = supported & env._hx_prev_supported
+    delta = torch.where(ok, cos_dev - env._hx_prev_cos, torch.zeros_like(cos_dev))
+    env._hx_accum = env._hx_accum + torch.nan_to_num(delta, nan=0.0)
+    env._hx_frontier = torch.maximum(env._hx_frontier, env._hx_accum)
+    pay = torch.clamp(env._hx_frontier - env._hx_paid, min=0.0, max=max_paid_per_step)
+    env._hx_paid = env._hx_paid + pay
+    env._hx_prev_cos = cos_dev
+    env._hx_prev_supported = supported
+    return pay

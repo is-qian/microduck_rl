@@ -35,6 +35,10 @@ from .microduck_headstand_env_cfg import (
     make_microduck_headstand_env_cfg,
     MicroduckHeadStandRlCfg,
 )
+from .microduck_headstand_exit_env_cfg import (
+    make_microduck_headstand_exit_env_cfg,
+    MicroduckHeadstandExitRlCfg,
+)
 from .microduck_velstand_env_cfg import (
     make_microduck_velstand_env_cfg,
     MicroduckVelStandRlCfg,
@@ -129,6 +133,15 @@ register_mjlab_task(
     env_cfg=make_microduck_headstand_env_cfg(),
     play_env_cfg=make_microduck_headstand_env_cfg(play=True),
     rl_cfg=MicroduckHeadStandRlCfg,
+    runner_cls=MicroduckOnPolicyRunner,
+)
+
+# Headstand-exit task — spawn inverted in the headstand, smoothly return to stand
+register_mjlab_task(
+    task_id="Mjlab-HeadstandExit-Flat-MicroDuck",
+    env_cfg=make_microduck_headstand_exit_env_cfg(),
+    play_env_cfg=make_microduck_headstand_exit_env_cfg(play=True),
+    rl_cfg=MicroduckHeadstandExitRlCfg,
     runner_cls=MicroduckOnPolicyRunner,
 )
 
