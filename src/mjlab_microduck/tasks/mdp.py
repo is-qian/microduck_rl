@@ -7817,13 +7817,14 @@ def headstand_progress(
     env: ManagerBasedRlEnv,
     feet_sensor_name: str,
     head_sensor_name: str,
-    max_paid_per_step: float = 0.05,
+    max_paid_per_step: float = 0.1,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
     """Potential-based bootstrap with a SUPPORT-GATED integrator: the
     inversion-cosine accumulator only integrates Δcos_dev on steps where the
     robot was ground-supported on BOTH the previous and current step, and
-    each step pays at most ``max_paid_per_step`` (excess forfeited). A
+    each step pays at most ``max_paid_per_step`` (excess forfeited — 0.2/step
+    still allows a fast supported roll, ~0.25 s for the full entry). A
     ballistic hop rotates for free in the air and its touchdown jump is
     forfeited — bounce-and-catch earns nothing (v3 hole, the same exploit as
     roulade run-1's ballistic whip). Camping and bobbing pay zero; a full
@@ -7887,6 +7888,7 @@ def set_headstand_spawn_state(
     root_z: float = 0.145,
     root_z_noise: float = 0.01,
     joint_noise_std: float = 0.1,
+    roll_vel_range: tuple = (0.0, 0.0),
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> None:
     """Reverse-curriculum spawns: a fraction of episodes start near-inverted
@@ -7916,6 +7918,12 @@ def set_headstand_spawn_state(
     env.sim.data.qpos[ids, 2] = z + _env_origin_z(env, ids)
     env.sim.data.qpos[ids, 3:7] = quat
     env.sim.data.qvel[ids, :6] = 0.0
+
+    # Initial forward roll rate (body-frame ω_y, roulade's forward sign): the
+    # policy learns to catch a fast roll INTO the hold, not just keep it.
+    lo, hi = roll_vel_range
+    if hi > 0.0:
+        env.sim.data.qvel[ids, 4] = torch.rand(n, device=env.device) * (hi - lo) + lo
 
     if joint_noise_std > 0.0:
         servo_ids = _servo_joint_ids(env, asset)

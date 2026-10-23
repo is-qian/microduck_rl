@@ -1,4 +1,4 @@
-"""Microduck *headstand* task (v6) — inverted balance on the head shell.
+"""Microduck *headstand* task (v7.1) — inverted balance on the head shell.
 
 V3 (2026-10-22): v1's ungated rewards were farmed lying down; v2's
 orientation-gated leg pose was farmed flopped with feet tucked (headstand_
@@ -8,7 +8,12 @@ and leg pose as a multiplicative composite with the hold gate. V4: the
 progress reward is now a SUPPORT-GATED INTEGRATOR with a per-step payment
 cap — v3's state-based frontier let ballistic hops bank mid-air rotation at
 touchdown (seen on video: bouncing, not entering). body_ang_vel near-zero
-during discovery (the entry IS a large-ω event).
+during discovery. V7 (entry needs SPEED — a fast roll, not a static
+push-off): progress payment cap raised 0.05→0.2/step, body_ang_vel off, and
+mid-roll spawns (100–180° tilt) carry 1–3 rad/s of forward angular momentum
+so the policy learns to catch a fast roll into the hold.
+V7.1: slower roll — spawn ω halved to 0.5–1.5 rad/s, payment cap
+tightened to 0.1/step (entry in ≥0.4 s): roll in, don't whip in.
 
 Episodic policy: start standing at HOME, enter a headstand (crouch → plant
 head → swing legs up), then hold inverted with feet in the air until timeout.
@@ -239,7 +244,7 @@ def make_microduck_headstand_env_cfg(
         func=microduck_mdp.joint_torque_rate_l2, weight=0.0  # curriculum later
     )
     cfg.rewards["body_ang_vel"].params["asset_cfg"].body_names = ("trunk_base",)
-    cfg.rewards["body_ang_vel"].weight = -0.01  # near-zero: the entry IS a large-ω event
+    cfg.rewards["body_ang_vel"].weight = 0.0  # off: the entry is a FAST roll, any ω tax blocks it
     cfg.rewards["angular_momentum"].weight = -0.02
     cfg.rewards.pop("soft_landing", None)
     cfg.rewards["self_collisions"] = RewardTermCfg(
@@ -377,11 +382,13 @@ def make_microduck_headstand_env_cfg(
         mode="reset",
         params={
             "near_inverted_prob": 0.4,
-            "tilt_min_deg": 140.0,
+            "tilt_min_deg": 100.0,
             "tilt_max_deg": 180.0,
             "root_z": 0.145,
             "root_z_noise": 0.01,
             "joint_noise_std": 0.1,
+            # mid-roll states carry forward angular momentum (1–3 rad/s)
+            "roll_vel_range": (0.5, 1.5),
         },
     )
     cfg.events["foot_friction"].params["asset_cfg"].geom_names = (
