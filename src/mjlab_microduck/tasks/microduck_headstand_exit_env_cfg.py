@@ -318,20 +318,20 @@ def make_microduck_headstand_exit_env_cfg(
     cfg.events.pop("push_robot", None)
 
     # Every episode starts in the headstand (the deployment hand-off).
-    # Stage 2 (robustness, after ~400 iters): widen to tilt_min_deg=150.0 and
-    # roll_vel_range=(-0.5, 0.5) so the policy also catches a hand-off where
-    # the robot is already tipping with some angular rate.
+    # Wide tilt + initial tip velocity: at policy switch-over the real robot
+    # may already be falling with some angular rate, and the exit policy must
+    # catch that, not just the ideal vertical headstand.
     cfg.events["headstand_spawn"] = EventTermCfg(
         func=microduck_mdp.set_headstand_spawn_state,
         mode="reset",
         params={
             "near_inverted_prob": 1.0,
-            "tilt_min_deg": 165.0,
+            "tilt_min_deg": 150.0,
             "tilt_max_deg": 180.0,
             "root_z": 0.145,
             "root_z_noise": 0.01,
             "joint_noise_std": 0.05,
-            "roll_vel_range": (0.0, 0.0),
+            "roll_vel_range": (-0.5, 0.5),
         },
     )
     cfg.events["reset_headstand_exit_state"] = EventTermCfg(
