@@ -55,7 +55,8 @@ def main() -> int:
     env_cfg.events["headstand_spawn"].params["near_inverted_prob"] = 0.0
     # Whole-robot ground contact: the true support signal (feet/head sensors
     # alone read a back-supported roll phase as unsupported).
-    env_cfg.scene.sensors = tuple(env_cfg.scene.sensors) + (
+    existing = {s.name for s in env_cfg.scene.sensors}
+    extra = () if "body_ground_contact" in existing else (
         ContactSensorCfg(
             name="body_ground_contact",
             primary=ContactMatch(mode="subtree", pattern="trunk_base", entity="robot"),
@@ -65,6 +66,7 @@ def main() -> int:
             num_slots=1,
         ),
     )
+    env_cfg.scene.sensors = tuple(env_cfg.scene.sensors) + extra
 
     device = "cuda:0"
     if args.video:
