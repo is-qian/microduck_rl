@@ -421,7 +421,15 @@ def make_microduck_headstand_env_cfg(
     cfg.terminations["flight"] = TerminationTermCfg(
         func=microduck_mdp.flight_run_terminated,
         time_out=False,
-        params={"sensor_name": "body_ground_contact", "max_steps": 5},
+        params={
+            "sensor_name": "body_ground_contact",
+            "max_steps": 5,
+            # Anneal 30 -> 5 over ~1500 iters at 4096 envs (98k steps/iter):
+            # the roulade prior dives into the roll, and a hard ban from
+            # step 0 kills every episode before the entry can be learned.
+            "warmup_max_steps": 30,
+            "warmup_total_steps": 150_000_000,
+        },
     )
 
     # ── Events ────────────────────────────────────────────────────────────────

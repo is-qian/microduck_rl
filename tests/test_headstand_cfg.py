@@ -67,6 +67,7 @@ def test_flight_termination_present():
     cfg = make_microduck_headstand_env_cfg()
     assert "flight" in cfg.terminations
     assert cfg.terminations["flight"].params["sensor_name"] == "body_ground_contact"
+    assert cfg.terminations["flight"].params["warmup_max_steps"] > cfg.terminations["flight"].params["max_steps"]
     assert "reset_flight_run" in cfg.events
 
 

@@ -7984,19 +7984,31 @@ def flight_run_terminated(
     env: ManagerBasedRlEnv,
     sensor_name: str,
     max_steps: int = 5,
+    warmup_max_steps: Optional[int] = None,
+    warmup_total_steps: int = 0,
 ) -> torch.Tensor:
     """Terminate when fully unsupported (no robot-body ground contact) for
     more than ``max_steps`` consecutive steps. A hop forfeits the ENTIRE
     remaining episode annuity — decisive where per-step penalties lose to
     arriving early. The roll hand-off is 1-2 steps and survives; the v8/v9
     hop is 10-16 steps and dies. Threshold stays above the inverted-spawn
-    settle (~3 steps from 2 cm)."""
+    settle (~3 steps from 2 cm).
+
+    With ``warmup_max_steps`` the threshold anneals linearly from
+    ``warmup_max_steps`` down to ``max_steps`` over ``warmup_total_steps``
+    env steps: a hard flight ban from step 0 kills every episode at ~0.3 s
+    (the roulade prior dives into the roll) and the policy never gets to
+    practice the entry; a gradual tighten grinds the flight out instead."""
     ctr = _flight_run(env)
     body = _sensor_any_contact(env, sensor_name)
     if body is None:
         return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
     env._flight_run_ctr = torch.where(body, torch.zeros_like(ctr), ctr + 1)
-    return env._flight_run_ctr > max_steps
+    threshold = max_steps
+    if warmup_max_steps is not None and warmup_total_steps > 0:
+        frac = min(1.0, env.common_step_counter / warmup_total_steps)
+        threshold = round(warmup_max_steps + (max_steps - warmup_max_steps) * frac)
+    return env._flight_run_ctr > threshold
 
 
 def root_z_ceiling_penalty(
